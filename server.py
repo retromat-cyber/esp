@@ -1,67 +1,53 @@
-from flask import Flask, request, jsonify
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import openai
 import os
-import base64
+import uvicorn
+from typing import List
 
-app = Flask(__name__)
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Новый клиент OpenAI (новый SDK)
-from openai import OpenAI
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+app = FastAPI()
 
-# -----------------------------  
-# 📌 1) Эндпоинт чата (обновлённый)
-# -----------------------------
-@app.route("/chat", methods=["POST"])
-def chat():
-    data = request.get_json()
-    messages = data.get("messages", [])
+WAKE_WORD = "chatgpt"
 
-    completion = client.chat.completions.create(
-        model="gpt-4o-mini",  # Лучше, быстрее, дешевле 
-        messages=messages
+# ======== /wake: принимает WAV, делает распознавание ========
+@app.post("/wake")
+async def wake_word_detect(file: UploadFile = File(...)):
+    audio = await file.read()
+
+    # Whisper model
+    text = openai.audio.transcriptions.create(
+        model="whisper-1",
+        file=("audio.wav", audio, "audio/wav")
+    ).text
+
+    activated = WAKE_WORD.lower() in text.lower()
+
+    return {"text": text, "wake": activated}
+
+# ======== /chat: прокси ChatGPT ========
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+
+@app.post("/chat")
+async def chat(req: ChatRequest):
+    answer = openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[m.dict() for m in req.messages]
     )
 
-    # Всегда возвращаем unified формат
-    return jsonify({
-        "content": completion.choices[0].message["content"]
-    })
+    return JSONResponse(answer.choices[0].message.dict())
 
-# -----------------------------  
-# 📌 2) Эндпоинт активации по слову "chatgpt"
-# -----------------------------
-@app.route("/wake", methods=["POST"])
-def wake_word_detect():
-    if "file" not in request.files:
-        return jsonify({"error": "no file"}), 400
-
-    file = request.files["file"]
-    audio_bytes = file.read()
-
-    # Отправляем wav/mp3 прямо как байты
-    transcript = client.audio.transcriptions.create(
-        model="gpt-4o-mini-tts",  # Whisper V3 встроенный
-        file=("wake.wav", audio_bytes)  # важно передать (имя, байты)
-    )
-
-    text = transcript.text.lower()
-    wake_word = "chatgpt"
-    activated = wake_word in text
-
-    return jsonify({
-        "text": text,
-        "wake": activated
-    })
-
-# -----------------------------  
-# 📌 3) Эндпоинт проверки сервера
-# -----------------------------
-@app.route("/", methods=["GET"])
+# ======== root ========
+@app.get("/")
 def home():
-    return "✅ ChatGPT Voice Server is running!"
+    return {"status": "ok", "message": "Wake + ChatGPT API ready"}
 
-# -----------------------------  
-# 📌 Запуск
-# -----------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    uvicorn.run("server:app", host="0.0.0.0", port=5000)
